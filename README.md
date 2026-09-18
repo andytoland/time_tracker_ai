@@ -43,7 +43,7 @@ flowchart LR
 The agent uses a chat model that supports **function calling (tool use)** to interpret natural language, select targets, and trigger storage operations.
 - **Recommended Model**: `gpt-4.1-mini` or `gpt-4o-mini`.
 - **Cost**: `gpt-4.1-mini` is Azure's cheapest tier model (~$0.00015 per 1,000 tokens). Typical daily time logging costs less than a penny per month.
-- **Deployment**: Deployed within your Azure OpenAI / Azure AI Foundry resource.
+- **Can it be created with Bicep?** **Yes!** You can deploy it automatically using [`../infra/openai.bicep`](../infra/openai.bicep) or together with storage using [`../infra/main.bicep`](../infra/main.bicep).
 
 ### 2. Azure Cloud Resources Required
 | Resource | SKU / Tier | Purpose | Estimated Cost |
@@ -54,7 +54,41 @@ The agent uses a chat model that supports **function calling (tool use)** to int
 
 ### 3. Local Environment Requirements
 - **Python**: Version 3.10 or newer (tested with Python 3.13).
-- **Azure CLI**: Required only if deploying infrastructure via Bicep.
+- **Azure CLI**: Required if deploying infrastructure via Bicep (`az login`, `az bicep build`).
+
+---
+
+## Infrastructure Deployment (Bicep)
+
+You can provision all required Azure cloud resources using the Bicep templates located in [`../infra/`](../infra/):
+
+### Option 1: Deploy Everything Together (Storage + GPT Mini)
+Deploys both the Azure Table Storage account and the Azure OpenAI `gpt-4.1-mini` model in one step:
+```powershell
+cd ..\infra
+az deployment group create `
+  --resource-group "<your-resource-group>" `
+  --template-file "./main.bicep" `
+  --parameters location="eastus2"
+```
+
+### Option 2: Deploy GPT Mini Model Only
+If you already have a storage account and just need the OpenAI model:
+```powershell
+cd ..\infra
+az deployment group create `
+  --resource-group "<your-resource-group>" `
+  --template-file "./openai.bicep" `
+  --parameters location="eastus2"
+```
+
+### Option 3: Deploy Storage Account Only
+```powershell
+cd ..\infra
+.\deploy.ps1 -ResourceGroupName "<your-resource-group>"
+```
+
+The deployment outputs all connection strings and keys directly in your terminal, ready to paste into your `.env` file.
 
 ---
 
@@ -86,12 +120,6 @@ AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4.1-mini"
 AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=<storage-account-name>;AccountKey=<key>;EndpointSuffix=core.windows.net"
 ```
 
-> **Need to create the Storage Account?**  
-> An automated Bicep template is available in the [`../infra/`](../infra/) folder. You can deploy it with:
-> ```powershell
-> cd ..\infra
-> .\deploy.ps1 -ResourceGroupName "<your-resource-group>"
-> ```
 
 ---
 
@@ -160,6 +188,8 @@ You: quit
 
 ```text
 ├── infra/
+│   ├── main.bicep            # All-in-one template (Storage + GPT Mini)
+│   ├── openai.bicep          # Bicep template for Azure OpenAI & GPT Mini
 │   ├── storage.bicep         # Bicep template for storage account & tables
 │   ├── storage.bicepparam    # Bicep parameters file
 │   ├── deploy.ps1            # Automated PowerShell deployment script
@@ -172,3 +202,4 @@ You: quit
 ├── .env                      # Application credentials & endpoints
 └── requirements.txt          # Python dependencies
 ```
+
