@@ -1,0 +1,9 @@
+azure-data-tables
+azure-identity
+openai
+python-dotenv
+httpx
+pyjwt
+mcp>=1.1.0
+
+

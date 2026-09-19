@@ -1,10 +1,12 @@
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from storage import TimeTrackerStorage
+from purchase_client import PurchaseCalcClient
 
 # Load environment variables
 env_paths = [
@@ -30,16 +32,18 @@ client = OpenAI(
     api_key=api_key
 )
 
-# Initialize Azure Table Storage
+# Initialize Storage & Purchase-Calc Client
 storage = TimeTrackerStorage()
+pcalc = PurchaseCalcClient()
 
 # Define tools for OpenAI function calling
 TOOLS = [
+    # ---------------- Azure Table Storage Tools ----------------
     {
         "type": "function",
         "function": {
             "name": "list_targets",
-            "description": "List all existing targets/projects that time can be logged against.",
+            "description": "List all existing targets/projects in Azure Table Storage that time can be logged against.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -51,7 +55,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "create_target",
-            "description": "Create a new target/project category.",
+            "description": "Create a new target/project category in Azure Table Storage.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -72,7 +76,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "log_time",
-            "description": "Log minutes spent on a specific target.",
+            "description": "Log minutes spent on a specific target into Azure Table Storage.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -97,7 +101,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_summary",
-            "description": "Get a summary of logged hours/minutes, either overall or for a specific target.",
+            "description": "Get a summary of logged hours/minutes from Azure Table Storage, either overall or for a specific target.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -109,12 +113,268 @@ TOOLS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_timer",
+            "description": "Start metering/timing an activity or project (e.g. when user says 'started X', 'start X', 'begin X').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_name": {
+                        "type": "string",
+                        "description": "The name of the target or activity being started (e.g. 'Thing X', 'Client Project A')."
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional notes or task details for this timer session."
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "Set to true if user explicitly requested to discard/overwrite an already running timer."
+                    }
+                },
+                "required": ["target_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_timer",
+            "description": "Stop the currently running timer, compute elapsed duration, and log it to Azure Table Storage (e.g. when user says 'end', 'stop', 'finished', 'done', 'ended').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional additional notes to attach to the finished time log entry."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_active_timer",
+            "description": "Check if a timer is currently active and get its elapsed duration and target name (e.g. when user says 'status', 'is timer running?', 'how long?').",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_timer",
+            "description": "Cancel and discard the active timer without logging any time (e.g. when user says 'cancel timer', 'discard timer').",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+
+    # ---------------- Purchase Calc (GCP Cloud Run) Tools ----------------
+    {
+        "type": "function",
+        "function": {
+            "name": "get_spending_summary",
+            "description": "Query and summarize expenses from purchase-calc on Cloud Run between start_date and end_date (YYYY-MM-DD). Returns total spent, transaction count, and breakdown by merchant/location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in format YYYY-MM-DD (e.g. '2026-01-01')."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date in format YYYY-MM-DD (e.g. '2026-12-31')."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional merchant or location filter (e.g. 'S-market', 'Hesburger')."
+                    }
+                },
+                "required": ["start_date", "end_date"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_spending",
+            "description": "Record a new expense/spending entry in purchase-calc on Cloud Run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sum": {
+                        "type": "number",
+                        "description": "The expense amount in EUR (e.g. 14.50)."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Merchant or location name (e.g. 'Prisma', 'Ravintola Hang Out')."
+                    },
+                    "payment_type": {
+                        "type": "string",
+                        "description": "Optional payment method (e.g. 'Amex', 'Debit', 'Cash')."
+                    },
+                    "date": {
+                        "type": "string",
+                        "description": "Optional date of purchase in YYYY-MM-DD format. Defaults to today."
+                    }
+                },
+                "required": ["sum", "location"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_todos",
+            "description": "List tasks and todos from purchase-calc on Cloud Run. Can filter by status.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["all", "pending", "completed"],
+                        "description": "Filter todos by status: 'pending' (open tasks), 'completed', or 'all'. Defaults to 'all'."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_todo",
+            "description": "Create a new task or todo in purchase-calc on Cloud Run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task description (e.g. 'Pay energy bill', 'Refactor API client')."
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Optional due date in YYYY-MM-DD format. Defaults to today."
+                    }
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_todo",
+            "description": "Toggle or complete a task in purchase-calc on Cloud Run by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todo_id": {
+                        "type": "integer",
+                        "description": "The numeric ID of the todo item to toggle/complete."
+                    }
+                },
+                "required": ["todo_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_purchases",
+            "description": "Fetch purchase records from purchase-calc on Cloud Run with optional date and origin filters.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional start date in YYYY-MM-DD format."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date in YYYY-MM-DD format."
+                    },
+                    "origin": {
+                        "type": "string",
+                        "description": "Optional origin filter."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_time_on_todo",
+            "description": "Log time spent on a purchase-calc todo task into Azure Table Storage, and optionally mark the task complete in purchase-calc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todo_id": {
+                        "type": "integer",
+                        "description": "The numeric ID of the todo task in purchase-calc."
+                    },
+                    "minutes": {
+                        "type": "integer",
+                        "description": "Number of minutes spent working on this task."
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional notes on what was accomplished."
+                    },
+                    "mark_completed": {
+                        "type": "boolean",
+                        "description": "Whether to mark the todo as completed in purchase-calc (default: false)."
+                    }
+                },
+                "required": ["todo_id", "minutes"]
+            }
+        }
+    },
+
+    # ---------------- Location & Google Timeline Tools ----------------
+    {
+        "type": "function",
+        "function": {
+            "name": "get_places_visited",
+            "description": "Retrieve the places and locations the user visited on a specific day or date range (from Google Timeline and purchase-calc). Returns place names, addresses, arrival/departure times, and durations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in format YYYY-MM-DD (e.g. '2026-01-23')."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date in format YYYY-MM-DD (defaults to start_date for a single day query)."
+                    }
+                },
+                "required": ["start_date"]
+            }
+        }
     }
 ]
 
 
 def execute_tool_call(tool_name: str, arguments: dict) -> str:
     """Executes the Python backend functions triggered by the agent."""
+    # ---------------- Azure Storage Tools ----------------
     if tool_name == "list_targets":
         targets = storage.list_targets()
         return json.dumps({"targets": targets})
@@ -138,40 +398,193 @@ def execute_tool_call(tool_name: str, arguments: dict) -> str:
         res = storage.get_summary(target_name=arguments.get("target_name"))
         return json.dumps(res)
 
+    elif tool_name == "start_timer":
+        res = storage.start_timer(
+            target_name=arguments.get("target_name"),
+            notes=arguments.get("notes", ""),
+            overwrite=arguments.get("overwrite", False)
+        )
+        return json.dumps(res)
+
+    elif tool_name == "stop_timer":
+        res = storage.stop_timer(notes=arguments.get("notes", ""))
+        return json.dumps(res)
+
+    elif tool_name == "get_active_timer":
+        res = storage.get_active_timer()
+        return json.dumps(res if res is not None else {"status": "no_active_timer", "message": "No active timer is currently running."})
+
+    elif tool_name == "cancel_timer":
+        res = storage.cancel_timer()
+        return json.dumps(res)
+
+    # ---------------- Purchase Calc Cloud Run Tools ----------------
+    elif tool_name == "get_spending_summary":
+        res = pcalc.get_spending_summary(
+            start_date=arguments.get("start_date"),
+            end_date=arguments.get("end_date"),
+            location=arguments.get("location")
+        )
+        return json.dumps(res)
+
+    elif tool_name == "add_spending":
+        res = pcalc.add_spending(
+            sum_amount=arguments.get("sum"),
+            location=arguments.get("location"),
+            payment_type=arguments.get("payment_type"),
+            date=arguments.get("date")
+        )
+        return json.dumps(res)
+
+    elif tool_name == "list_todos":
+        res = pcalc.list_todos(status=arguments.get("status", "all"))
+        return json.dumps(res)
+
+    elif tool_name == "create_todo":
+        res = pcalc.create_todo(
+            task=arguments.get("task"),
+            due_date=arguments.get("due_date")
+        )
+        return json.dumps(res)
+
+    elif tool_name == "toggle_todo":
+        res = pcalc.toggle_todo(todo_id=arguments.get("todo_id"))
+        return json.dumps(res)
+
+    elif tool_name == "get_purchases":
+        res = pcalc.get_purchases(
+            start_date=arguments.get("start_date"),
+            end_date=arguments.get("end_date"),
+            origin=arguments.get("origin")
+        )
+        return json.dumps(res)
+
+    elif tool_name == "log_time_on_todo":
+        todo_id = arguments.get("todo_id")
+        minutes = arguments.get("minutes")
+        notes = arguments.get("notes", "")
+        mark_completed = arguments.get("mark_completed", False)
+
+        # Look up todo task name
+        todos = pcalc.list_todos()
+        matched = next((t for t in todos if isinstance(t, dict) and t.get("id") == todo_id), None)
+        task_name = matched.get("task") if matched else f"Task #{todo_id}"
+
+        # Ensure target exists and log time in Azure Table Storage
+        storage.create_target(task_name, description=f"Imported from purchase-calc todo #{todo_id}")
+        time_res = storage.log_time(target_name=task_name, minutes=minutes, notes=notes)
+
+        # Toggle todo if requested and not already completed
+        todo_res = None
+        if mark_completed and matched and not matched.get("isCompleted"):
+            todo_res = pcalc.toggle_todo(todo_id)
+
+        return json.dumps({
+            "status": "success",
+            "time_tracking": time_res,
+            "todo_updated": todo_res if todo_res else ("Already completed" if matched and matched.get("isCompleted") else "Unchanged")
+        })
+
+    # ---------------- Location & Google Timeline Tools ----------------
+    elif tool_name == "get_places_visited":
+        start_date = arguments.get("start_date")
+        end_date = arguments.get("end_date") or start_date
+
+        # 1. Fetch from Azure Table Storage (Google Timeline imports)
+        timeline_visits = storage.get_timeline_visits(start_date=start_date, end_date=end_date)
+
+        # 2. Fetch from purchase-calc Cloud Run
+        pcalc_visits = pcalc.get_visits(start_date=start_date, end_date=end_date)
+
+        # Merge and deduplicate
+        combined = []
+        seen_keys = set()
+
+        for v in timeline_visits:
+            key = (v.get("date"), (v.get("place_name") or "").lower(), v.get("time"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                combined.append(v)
+
+        for v in pcalc_visits:
+            key = (v.get("date"), (v.get("place_name") or "").lower(), v.get("time"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                combined.append(v)
+
+        # Sort chronologically by date and time
+        combined.sort(key=lambda x: (x.get("date", ""), x.get("time", "")))
+
+        return json.dumps({
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_visits": len(combined),
+            "visits": combined
+        })
+
     return json.dumps({"error": f"Unknown function {tool_name}"})
 
 
-SYSTEM_PROMPT = """You are an intelligent Azure Time Tracking Assistant.
-Your job is to help the user log their time (minutes/hours) against specific targets or projects, and report their logged time. All data is securely stored in Azure Table Storage.
+SYSTEM_PROMPT = """You are an intelligent AI Assistant with multi-domain capabilities:
+1. Time Tracking: Logging minutes/hours against project targets (persisted in Azure Table Storage).
+2. Personal Finance & Tasks (Purchase Calc): Managing expenses, spending breakdowns, purchases, and todos (hosted 24/7 on Google Cloud Run at pc.lightsaber.biz).
+3. Location & Timeline History: Answering queries about visited places, locations, arrival/departure times, and durations (from Google Timeline and purchase-calc).
 
 CONVERSATIONAL RULES:
-1. When the user mentions spending time (e.g., "45 minutes", "1.5 hours", "spent 30 min"):
-   - If they did NOT specify what target it was for:
-     a) Call `list_targets` to retrieve existing targets.
-     b) If targets exist, present them clearly as a numbered list of ready options.
-     c) Prompt the user: Ask which target this was for, or offer that they can create a new target if none of the options are suitable.
-   - If they DID specify a target (e.g. "I spent 45 minutes on Thing X"):
-     a) Check if "Thing X" exists in `list_targets`.
-     b) If it doesn't exist, create it with `create_target`.
-     c) Log the time using `log_time`.
-     d) Clearly confirm the entry (minutes logged and new total hours for that target).
-2. If the user picks an option by number or name, or supplies a new target name:
-   - Call `create_target` if new, then `log_time`.
-   - Confirm the time logged and show the updated total.
-3. If the user asks for a summary, report, or status ("how many hours", "show summary"):
-   - Call `get_summary` and present a clean, concise breakdown of hours and minutes.
-4. Keep answers friendly, concise, and helpful.
+1. Time Tracking (Azure Table Storage):
+   - Live Activity Metering ("started X" / "end"):
+     * When user starts an activity (e.g. "started X", "start X", "starting project Y", "begin X"):
+       - Call `start_timer` with `target_name="X"`.
+       - If status is 'already_running', tell the user that a timer is already running for the previous target and ask if they'd like to end/log that one first or overwrite it.
+       - Confirm that the timer has started for that target and mention: "Just say 'end' when you finish!"
+     * When user finishes an activity (e.g. "end", "stop", "finished", "done", "ended"):
+       - Call `stop_timer`.
+       - If status is 'no_active_timer', inform the user that no timer is currently active.
+       - If stopped, report the elapsed minutes (and hours), confirm the time was recorded in Azure Table Storage, and show the updated target total.
+     * When user checks status or duration (e.g. "status", "is timer running?", "how long?"):
+       - Call `get_active_timer` and report whether a timer is active, the target name, and elapsed minutes/hours.
+     * When user cancels a timer (e.g. "cancel timer", "discard timer"):
+       - Call `cancel_timer` and confirm it was discarded without logging.
+   - Manual Time Logging (e.g. "45 minutes", "1.5 hours", "spent 30 min on Thing X"):
+     - If no target specified: call `list_targets`, present existing options, and ask which target or offer to create a new one.
+     - If target specified: ensure target exists (via `create_target`), then call `log_time`.
+   - If user asks for time summary/reports: call `get_summary`.
+   - If user worked on a specific task/todo from purchase-calc: call `log_time_on_todo` to log time in Azure and optionally mark the task completed.
+
+2. Personal Finance & Expenses (Purchase Calc on Cloud Run):
+   - When the user asks about spending or expenses (e.g. "How much did I spend this month?", "Show expenses at S-market"):
+     - Calculate appropriate start_date and end_date based on current date and user intent (e.g., current month, current year).
+     - Call `get_spending_summary` (and filter by location if requested).
+     - Present totals and breakdown clearly in EUR (€).
+   - When the user wants to log an expense (e.g. "Spent 12.50 at Hesburger"):
+     - Call `add_spending` with the sum and location.
+
+3. Tasks & Todos (Purchase Calc on Cloud Run):
+   - When the user asks to see tasks/todos: call `list_todos` (use status='pending' if they ask for open/uncompleted tasks).
+   - When user wants to add a task: call `create_todo`.
+   - When user completes a task: call `toggle_todo`.
+
+4. Location & Timeline History (Google Timeline & Purchase-Calc):
+   - When the user asks where they were, which places they visited, or whether they visited a specific store/restaurant (e.g. "Where was I on Jan 23rd?", "Which places did I visit last week?", "Did I go to Fressi?"):
+     - Call `get_places_visited` with start_date and end_date.
+     - Present the visits chronologically with times (e.g. arrival/departure), place names, addresses, and durations if available.
+     - If the user was working at a location and wants to log time, offer or proceed to log project time in Azure Table Storage.
+
+Keep answers friendly, concise, and helpful. Format money amounts in EUR (€) and durations clearly in minutes and hours.
 """
 
 
 def chat():
-    print("=" * 60)
-    print(" Azure Time Tracker Agent (Powered by Azure Table Storage)")
+    print("=" * 65)
+    print(" AI Assistant: Azure Time Tracking & Purchase-Calc (Cloud Run)")
     print(" Type 'quit' or 'exit' to end the session.")
-    print("=" * 60)
+    print("=" * 65)
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    system_content = f"{SYSTEM_PROMPT}\nToday's date is: {today_str}\n"
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
+        {"role": "system", "content": system_content}
     ]
 
     while True:
@@ -232,4 +645,3 @@ def chat():
 
 if __name__ == "__main__":
     chat()
-

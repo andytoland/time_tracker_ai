@@ -15,7 +15,7 @@ except ImportError:
 
 
 def sanitize_table_key(key: str) -> str:
-    """Disallow invalid Azure Table partition/row key characters: / \ # ? and control chars."""
+    r"""Disallow invalid Azure Table partition/row key characters: / \ # ? and control chars."""
     if not key:
         return "UNKNOWN"
     cleaned = re.sub(r'[/\\#?\x00-\x1f\x7f-\x9f]', '_', key.strip())
@@ -49,6 +49,8 @@ class TimeTrackerStorage:
         self.service_client = TableServiceClient.from_connection_string(self.connection_string)
         self.targets_table_name = "TimeTargets"
         self.logs_table_name = "TimeLogs"
+        self.timeline_table_name = "TimelineVisits"
+        self.active_timers_table_name = "ActiveTimers"
 
         self._ensure_tables_exist()
 
@@ -57,11 +59,15 @@ class TimeTrackerStorage:
         try:
             self.service_client.create_table_if_not_exists(table_name=self.targets_table_name)
             self.service_client.create_table_if_not_exists(table_name=self.logs_table_name)
+            self.service_client.create_table_if_not_exists(table_name=self.timeline_table_name)
+            self.service_client.create_table_if_not_exists(table_name=self.active_timers_table_name)
         except Exception as ex:
             print(f"[Storage Warning] Could not ensure tables exist: {ex}")
 
         self.targets_client = self.service_client.get_table_client(self.targets_table_name)
         self.logs_client = self.service_client.get_table_client(self.logs_table_name)
+        self.timeline_client = self.service_client.get_table_client(self.timeline_table_name)
+        self.active_timers_client = self.service_client.get_table_client(self.active_timers_table_name)
 
     def list_targets(self) -> list[dict]:
         """Fetch all registered targets."""
@@ -210,4 +216,200 @@ class TimeTrackerStorage:
                 for t in targets
             ]
         }
+
+    # -------------------------------------------------------------------------
+    # Timeline Visits Endpoints (Google Maps Timeline)
+    # -------------------------------------------------------------------------
+
+    def save_timeline_visit(self, visit_entity: dict) -> None:
+        """Upsert a single timeline visit into Azure Table Storage."""
+        self.timeline_client.upsert_entity(entity=visit_entity, mode=UpdateMode.MERGE)
+
+    def batch_save_timeline_visits(self, visits: list[dict]) -> int:
+        """Save a list of timeline visit entities."""
+        saved_count = 0
+        for v in visits:
+            try:
+                self.save_timeline_visit(v)
+                saved_count += 1
+            except Exception as ex:
+                print(f"[Storage Warning] Could not save visit {v.get('RowKey')}: {ex}")
+        return saved_count
+
+    def get_timeline_visits(self, start_date: str, end_date: str = None) -> list[dict]:
+        """Fetch timeline visits between start_date and end_date (YYYY-MM-DD)."""
+        if not end_date:
+            end_date = start_date
+
+        try:
+            if start_date == end_date:
+                query_filter = f"PartitionKey eq '{start_date}'"
+            else:
+                query_filter = f"PartitionKey ge '{start_date}' and PartitionKey le '{end_date}'"
+
+            entities = self.timeline_client.query_entities(query_filter=query_filter)
+            visits = []
+            for e in entities:
+                st = e.get("StartTime", "")
+                visits.append({
+                    "date": e.get("PartitionKey"),
+                    "start_time": st,
+                    "end_time": e.get("EndTime", ""),
+                    "time": st[11:16] if len(st) >= 16 else "",
+                    "duration_minutes": int(e.get("DurationMinutes", 0)),
+                    "place_name": e.get("PlaceName", "Unknown"),
+                    "address": e.get("Address", ""),
+                    "latitude": float(e["Latitude"]) if "Latitude" in e and e["Latitude"] is not None else None,
+                    "longitude": float(e["Longitude"]) if "Longitude" in e and e["Longitude"] is not None else None,
+                    "activity_type": e.get("ActivityType", ""),
+                    "google_place_id": e.get("GooglePlaceId", ""),
+                    "source": "google-timeline"
+                })
+            visits.sort(key=lambda x: x.get("start_time", ""))
+            return visits
+        except Exception as ex:
+            print(f"[Storage Error] Error fetching timeline visits: {ex}")
+            return []
+
+    # -------------------------------------------------------------------------
+    # Active Timer Methods ("started X" / "end")
+    # -------------------------------------------------------------------------
+
+    def start_timer(self, target_name: str, notes: str = "", overwrite: bool = False) -> dict:
+        """Start a live timer for an activity/target.
+        
+        If a timer is already running and overwrite is False, returns status 'already_running'.
+        """
+        name = target_name.strip()
+        current = self.get_active_timer()
+        if current and not overwrite:
+            return {
+                "status": "already_running",
+                "active_timer": current,
+                "message": f"Timer is already running for '{current['target_name']}' (started {current['elapsed_minutes']} minutes ago)."
+            }
+
+        # Ensure target exists in TimeTargets table
+        target = self.get_target(name)
+        if not target:
+            self.create_target(name)
+
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        entity = {
+            "PartitionKey": "TIMER",
+            "RowKey": "CURRENT",
+            "TargetName": name,
+            "Notes": notes or "",
+            "StartedAt": now_str
+        }
+        self.active_timers_client.upsert_entity(entity=entity, mode=UpdateMode.MERGE)
+        return {
+            "status": "started",
+            "target_name": name,
+            "notes": notes or "",
+            "started_at": now_str,
+            "message": f"Started timer for '{name}'."
+        }
+
+    def get_active_timer(self) -> dict | None:
+        """Fetch the currently running timer with live elapsed duration."""
+        try:
+            entity = self.active_timers_client.get_entity(partition_key="TIMER", row_key="CURRENT")
+            started_at_str = entity.get("StartedAt", "")
+            target_name = entity.get("TargetName", "")
+            notes = entity.get("Notes", "")
+
+            if not started_at_str:
+                return None
+
+            started_at = datetime.fromisoformat(started_at_str)
+            now = datetime.now(timezone.utc)
+            elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+            elapsed_minutes = round(elapsed_seconds / 60, 1)
+
+            return {
+                "target_name": target_name,
+                "notes": notes,
+                "started_at": started_at_str,
+                "elapsed_seconds": elapsed_seconds,
+                "elapsed_minutes": elapsed_minutes,
+                "elapsed_hours": round(elapsed_seconds / 3600, 2)
+            }
+        except ResourceNotFoundError:
+            return None
+        except Exception as ex:
+            print(f"[Storage Error] Error getting active timer: {ex}")
+            return None
+
+    def stop_timer(self, notes: str = "") -> dict:
+        """Stop the active timer, calculate elapsed duration, log to storage, and delete the active timer entity."""
+        timer = self.get_active_timer()
+        if not timer:
+            return {
+                "status": "no_active_timer",
+                "message": "No active timer is currently running."
+            }
+
+        target_name = timer["target_name"]
+        started_at_str = timer["started_at"]
+        started_at = datetime.fromisoformat(started_at_str)
+        now = datetime.now(timezone.utc)
+        elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+
+        # Minimum 1 minute if at least 1 second has elapsed
+        minutes = max(1, round(elapsed_seconds / 60))
+
+        # Combine notes if provided
+        combined_notes_parts = []
+        if timer.get("notes"):
+            combined_notes_parts.append(timer["notes"])
+        if notes:
+            combined_notes_parts.append(notes)
+        combined_notes = " - ".join(combined_notes_parts)
+
+        # Log to TimeLogs and update TimeTargets
+        log_res = self.log_time(target_name=target_name, minutes=minutes, notes=combined_notes)
+
+        # Remove the active timer entity
+        try:
+            self.active_timers_client.delete_entity(partition_key="TIMER", row_key="CURRENT")
+        except Exception as ex:
+            print(f"[Storage Warning] Could not delete active timer entity: {ex}")
+
+        return {
+            "status": "stopped",
+            "target_name": target_name,
+            "minutes_logged": minutes,
+            "elapsed_seconds": elapsed_seconds,
+            "target_total_minutes": log_res["target_total_minutes"],
+            "target_total_hours": log_res["target_total_hours"],
+            "started_at": started_at_str,
+            "stopped_at": now.isoformat(),
+            "notes": combined_notes,
+            "message": f"Stopped timer for '{target_name}'. Logged {minutes} minutes ({log_res['target_total_hours']} hrs total)."
+        }
+
+    def cancel_timer(self) -> dict:
+        """Cancel and discard the active timer without logging any time."""
+        timer = self.get_active_timer()
+        if not timer:
+            return {
+                "status": "no_active_timer",
+                "message": "No active timer is currently running."
+            }
+
+        try:
+            self.active_timers_client.delete_entity(partition_key="TIMER", row_key="CURRENT")
+        except Exception as ex:
+            print(f"[Storage Warning] Could not delete active timer entity: {ex}")
+
+        return {
+            "status": "cancelled",
+            "target_name": timer["target_name"],
+            "started_at": timer["started_at"],
+            "message": f"Timer for '{timer['target_name']}' has been cancelled without logging time."
+        }
+
+
 
