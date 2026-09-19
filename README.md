@@ -94,12 +94,58 @@ The deployment outputs all connection strings and keys directly in your terminal
 
 ## Installation & Setup
 
-### 1. Install Python Dependencies
-Activate your virtual environment and install the required packages:
+### 1. Create and Enter (Activate) Python Virtual Environment
+
+Using a virtual environment keeps your project dependencies isolated from global Python packages.
+
+#### Step A: Create the Virtual Environment (First Time Only)
+Run this from your project or repository root:
 
 ```powershell
-# In PowerShell (Windows)
-.\.venv\Scripts\Activate.ps1
+# Using Python
+python -m venv .venv
+
+# On Windows, if python is not in PATH, you can also use the Python launcher:
+py -m venv .venv
+```
+
+#### Step B: Enter (Activate) the Virtual Environment
+Run the activation script corresponding to your terminal and operating system:
+
+- **Windows PowerShell:**
+  ```powershell
+  .\.venv\Scripts\Activate.ps1
+  ```
+  > **PowerShell Execution Policy Note:** If you encounter an error stating that `running scripts is disabled on this system`, allow script execution for the current session:
+  > ```powershell
+  > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+  > .\.venv\Scripts\Activate.ps1
+  > ```
+
+- **Windows Command Prompt (cmd.exe):**
+  ```cmd
+  .\.venv\Scripts\activate.bat
+  ```
+
+- **Linux / macOS / WSL (Bash or Zsh):**
+  ```bash
+  source .venv/bin/activate
+  ```
+
+Once activated, your terminal prompt will be prefixed with `(.venv)`.
+
+#### Step C: Leave (Deactivate) the Virtual Environment
+When you are done and want to return to your global Python environment, run:
+```powershell
+deactivate
+```
+
+### 2. Install Python Dependencies
+With your virtual environment activated `(.venv)`, install the required packages:
+
+```powershell
+# Upgrade pip (optional but recommended)
+python -m pip install --upgrade pip
 
 # Install requirements
 pip install -r requirements.txt
@@ -107,7 +153,7 @@ pip install -r requirements.txt
 
 *(Packages used: `azure-data-tables`, `openai`, `python-dotenv`, `azure-identity`)*
 
-### 2. Configure Environment Variables (`.env`)
+### 3. Configure Environment Variables (`.env`)
 Create or edit your `.env` file in the project root with the following keys:
 
 ```env
