@@ -73,15 +73,23 @@ class PurchaseCalcClient:
 
     def _get_token(self) -> str:
         """Returns the configured token or dynamically generates a fresh JWT."""
-        if self.static_token:
+        token = self.static_token or os.getenv("PURCHASE_CALC_BEARER_TOKEN")
+        if not token:
+            env_file = Path(__file__).resolve().parent / ".env"
+            if env_file.exists():
+                load_dotenv(dotenv_path=env_file, override=True)
+            token = os.getenv("PURCHASE_CALC_BEARER_TOKEN")
+
+        if token:
             # Strip any extraneous chat prefix if present
-            clean_token = self.static_token.strip()
+            clean_token = token.strip()
             if "]" in clean_token and "eyJ" in clean_token:
                 clean_token = clean_token[clean_token.find("eyJ"):]
             return clean_token
 
-        if self.jwt_secret:
-            return generate_jwt_token(secret=self.jwt_secret, email=self.user_email)
+        jwt_sec = self.jwt_secret or os.getenv("PURCHASE_CALC_JWT_SECRET")
+        if jwt_sec:
+            return generate_jwt_token(secret=jwt_sec, email=self.user_email)
 
         raise ValueError("Neither PURCHASE_CALC_BEARER_TOKEN nor PURCHASE_CALC_JWT_SECRET is configured.")
 
