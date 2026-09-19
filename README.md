@@ -1,6 +1,6 @@
-# Azure Time Tracker AI Agent
+# Azure Time Tracker & Purchase-Calc AI Agent
 
-An intelligent, conversational AI assistant that logs time spent on projects and tasks. It takes inputs in natural language (e.g., minutes or hours), interactively suggests existing project targets, allows creating new targets on the fly, and persists all data to **Azure Table Storage**—the most cost-effective storage option in Azure.
+An intelligent, conversational AI assistant that logs time spent on projects and integrates with **Purchase-Calc** (hosted 24/7 on **Google Cloud Run**). It logs time in natural language into **Azure Table Storage**, queries expenses, summarizes merchant spending, and manages tasks/todos.
 
 ---
 
@@ -22,17 +22,22 @@ flowchart LR
         end
     end
 
+    subgraph GCP["Google Cloud Platform (24/7)"]
+        CloudRun["Cloud Run API: pc.lightsaber.biz\n(NestJS REST API)"]
+        Postgres[("Cloud SQL PostgreSQL\n(purchases DB)")]
+        CloudRun <--> Postgres
+    end
+
     Agent <-->|"Natural Language & Tools"| Model
     Agent <-->|"Save / Query Logs"| Storage
+    Agent <-->|"HTTPS + JWT Bearer Auth"| CloudRun
 ```
 
 1. **Conversational Interface**: You chat with `agent.py` in natural language.
-2. **Azure OpenAI Model**: The model interprets your request and triggers functions/tools:
-   - `list_targets`: Retrieves existing targets from storage.
-   - `create_target`: Creates a new project category.
-   - `log_time`: Records the duration in minutes against the selected target.
-   - `get_summary`: Calculates and aggregates hours and minutes across targets.
-3. **Azure Table Storage**: Stores data in two lightweight, serverless tables (`TimeTargets` and `TimeLogs`).
+2. **Azure OpenAI Model**: Interprets intent and triggers backend functions/tools:
+   - **Time Tracking (Azure Table Storage)**: `list_targets`, `create_target`, `log_time`, `get_summary`.
+   - **Personal Finance & Tasks (GCP Cloud Run)**: `get_spending_summary`, `add_spending`, `list_todos`, `create_todo`, `toggle_todo`, `get_purchases`.
+   - **Cross-Service Synergy**: `log_time_on_todo` (logs time in Azure against a purchase-calc task and optionally completes it on Cloud Run).
 
 ---
 
@@ -40,64 +45,28 @@ flowchart LR
 
 ### 1. Does it need a model deployed on Azure?
 **Yes.** 
-The agent uses a chat model that supports **function calling (tool use)** to interpret natural language, select targets, and trigger storage operations.
+The agent uses an Azure OpenAI chat model with **function calling (tool use)**:
 - **Recommended Model**: `gpt-4.1-mini` or `gpt-4o-mini`.
-- **Cost**: `gpt-4.1-mini` is Azure's cheapest tier model (~$0.00015 per 1,000 tokens). Typical daily time logging costs less than a penny per month.
-- **Can it be created with Bicep?** **Yes!** You can deploy it automatically using [`../infra/openai.bicep`](../infra/openai.bicep) or together with storage using [`../infra/main.bicep`](../infra/main.bicep).
+- **Can it be created with Bicep?** **Yes!** You can deploy it using [`../infra/openai.bicep`](../infra/openai.bicep) or together with storage using [`../infra/main.bicep`](../infra/main.bicep).
 
-### 2. Azure Cloud Resources Required
-| Resource | SKU / Tier | Purpose | Estimated Cost |
+### 2. Cloud Resources Required
+| Resource | Provider | Purpose | Estimated Cost |
 | :--- | :--- | :--- | :--- |
-| **Azure Storage Account** | `Standard_LRS` (StorageV2) | Stores `TimeTargets` and `TimeLogs` | **< $0.01 / month** (~$0.045/GB/month) |
-| **Azure OpenAI Service** | `gpt-4.1-mini` | AI agent reasoning and tool calling | **Pay-as-you-go** (fractions of a cent) |
-| **Resource Group** | N/A | Logical container for resources | **Free** |
-
-### 3. Local Environment Requirements
-- **Python**: Version 3.10 or newer (tested with Python 3.13).
-- **Azure CLI**: Required if deploying infrastructure via Bicep (`az login`, `az bicep build`).
-
----
-
-## Infrastructure Deployment (Bicep)
-
-You can provision all required Azure cloud resources using the Bicep templates located in [`../infra/`](../infra/):
-
-### Option 1: Deploy Everything Together (Storage + GPT Mini)
-Deploys both the Azure Table Storage account and the Azure OpenAI `gpt-4.1-mini` model in one step:
-```powershell
-cd ..\infra
-az deployment group create `
-  --resource-group "<your-resource-group>" `
-  --template-file "./main.bicep" `
-  --parameters location="eastus2"
-```
-
-### Option 2: Deploy GPT Mini Model Only
-If you already have a storage account and just need the OpenAI model:
-```powershell
-cd ..\infra
-az deployment group create `
-  --resource-group "<your-resource-group>" `
-  --template-file "./openai.bicep" `
-  --parameters location="eastus2"
-```
-
-### Option 3: Deploy Storage Account Only
-```powershell
-cd ..\infra
-.\deploy.ps1 -ResourceGroupName "<your-resource-group>"
-```
-
-The deployment outputs all connection strings and keys directly in your terminal, ready to paste into your `.env` file.
+| **Azure Storage Account** | Azure | Stores `TimeTargets` and `TimeLogs` | **< $0.01 / month** (~$0.045/GB/month) |
+| **Azure OpenAI Service** | Azure | AI agent reasoning and tool calling | **Pay-as-you-go** (fractions of a cent) |
+| **Purchase-Calc API** | GCP Cloud Run | REST API for spending, budgets, todos | **24/7 Serverless** (free tier / minimal) |
 
 ---
 
 ## Installation & Setup
 
 ### 1. Install Python Dependencies
-Activate your virtual environment and install the required packages:
+Create and activate your virtual environment, then install the required packages:
 
 ```powershell
+# Create virtual environment
+python -m venv .venv
+
 # In PowerShell (Windows)
 .\.venv\Scripts\Activate.ps1
 
@@ -105,10 +74,10 @@ Activate your virtual environment and install the required packages:
 pip install -r requirements.txt
 ```
 
-*(Packages used: `azure-data-tables`, `openai`, `python-dotenv`, `azure-identity`)*
+*(Packages used: `azure-data-tables`, `openai`, `python-dotenv`, `azure-identity`, `httpx`, `pyjwt`)*
 
 ### 2. Configure Environment Variables (`.env`)
-Create or edit your `.env` file in the project root with the following keys:
+Create or edit your `.env` file in the project root:
 
 ```env
 # Azure OpenAI Service Configuration
@@ -116,70 +85,79 @@ AZURE_OPENAI_ENDPOINT="https://<your-openai-resource>.services.ai.azure.com/open
 AZURE_OPENAI_API_KEY="<your-azure-openai-api-key>"
 AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4.1-mini"
 
-# Azure Storage Account Configuration (Cheapest Standard_LRS Table Storage)
+# Azure Storage Account Configuration
 AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=<storage-account-name>;AccountKey=<key>;EndpointSuffix=core.windows.net"
-```
 
+# GCP Cloud Run Purchase-Calc Backend Configuration
+PURCHASE_CALC_API_URL="https://pc.lightsaber.biz"
+PURCHASE_CALC_BEARER_TOKEN="<your-jwt-bearer-token>"
+PURCHASE_CALC_JWT_SECRET="<your-jwt-secret>"
+PURCHASE_CALC_USER_EMAIL="antti.tolamo@gmail.com"
+```
 
 ---
 
 ## Usage Guide
 
-### 1. Test Storage Connectivity (Optional)
-Run the test script to ensure tables are reachable:
+### 1. Test Storage & Cloud Run Connectivity
+Run the test scripts:
 ```powershell
+# Check Azure Table Storage
 python test_storage.py
+
+# Check GCP Cloud Run Purchase-Calc REST API
+python test_purchase_integration.py
 ```
 
 ### 2. Start the Agent
-Launch the interactive agent:
+Launch the interactive assistant:
 ```powershell
 python agent.py
 ```
 
 ### 3. Example Conversations
 
-#### Scenario A: Log minutes without a target
+#### Scenario A: Log time without a target
 ```text
 You: 45 minutes
-
 Agent: Great! What was this for? Here are your current targets:
 1. Thing X
 2. Website Redesign
-
 Which of these was this for? Or if none of these fit, you can give me a new target name to create.
 ```
 
-#### Scenario B: Select an existing option or create a new target
+#### Scenario B: Query spending from Purchase-Calc
 ```text
-You: Option 1
-# OR
-You: Create new target "Azure AI Certification"
-
-Agent: Created target "Azure AI Certification" and logged 45 minutes (0.75 hours). Your total time on Azure AI Certification is now 0.75 hours.
+You: How much did I spend this month?
+Agent: In March 2026, you had 32 transactions totaling 482.15 EUR:
+- S-market: 215.40 EUR
+- Ravintola Hang Out: 84.50 EUR
+- Hesburger: 32.20 EUR
+- Other locations: 150.05 EUR
 ```
 
-#### Scenario C: Log time and project in one prompt
+#### Scenario C: View and manage Todos
 ```text
-You: I spent 30 minutes on Thing X
-
-Agent: Logged 30 minutes on Thing X. Your total on Thing X is now 1.25 hours (75 minutes).
+You: What tasks do I have pending?
+Agent: Here are your open tasks from Purchase-Calc:
+1. #4: Tarkista omaposti onko energia lasku maksettu (Due: 2026-06-02)
 ```
 
-#### Scenario D: View time summary
+#### Scenario D: Log time on a Todo and mark it done
 ```text
-You: show summary
+You: I spent 30 minutes on task #4 and finished it
+Agent: Done!
+- Logged 30 minutes on "Tarkista omaposti onko energia lasku maksettu" in Azure Table Storage.
+- Marked task #4 as completed in Purchase-Calc.
+```
 
-Agent: Here is your logged time summary:
+#### Scenario E: View time tracking summary
+```text
+You: show time summary
+Agent: Here is your logged time summary from Azure Table Storage:
 - Thing X: 75 minutes (1.25 hours)
-- Azure AI Certification: 45 minutes (0.75 hours)
-
-Total time logged: 120 minutes (2.00 hours) across 2 targets.
-```
-
-#### Scenario E: Exit
-```text
-You: quit
+- Tarkista omaposti onko energia lasku maksettu: 30 minutes (0.50 hours)
+Total time logged: 105 minutes across 2 targets.
 ```
 
 ---
@@ -187,19 +165,13 @@ You: quit
 ## File Structure
 
 ```text
-├── infra/
-│   ├── main.bicep            # All-in-one template (Storage + GPT Mini)
-│   ├── openai.bicep          # Bicep template for Azure OpenAI & GPT Mini
-│   ├── storage.bicep         # Bicep template for storage account & tables
-│   ├── storage.bicepparam    # Bicep parameters file
-│   ├── deploy.ps1            # Automated PowerShell deployment script
-│   └── README.md             # Infrastructure documentation
-├── time_tracker/
-│   ├── agent.py              # Main conversational agent (Azure OpenAI + tools)
-│   ├── storage.py            # Azure Table Storage client & table management
-│   ├── test_storage.py       # Quick connectivity check script
-│   └── README.md             # This documentation
-├── .env                      # Application credentials & endpoints
-└── requirements.txt          # Python dependencies
+time_tracker_ai/
+├── agent.py                      # Conversational agent (Azure OpenAI + dual tool dispatch)
+├── storage.py                    # Azure Table Storage client (TimeTargets & TimeLogs)
+├── purchase_client.py            # GCP Cloud Run REST API client (JWT Auth + HTTPS)
+├── test_storage.py               # Storage connectivity check
+├── test_purchase_integration.py  # Cloud Run API connectivity check
+├── .env                          # API keys, connection strings, Cloud Run URL
+├── requirements.txt              # Python dependencies
+└── README.md                     # Documentation
 ```
-

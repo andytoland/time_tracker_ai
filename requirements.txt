@@ -1,0 +1,7 @@
+azure-data-tables
+azure-identity
+openai
+python-dotenv
+httpx
+pyjwt
+
