@@ -247,3 +247,53 @@ class PurchaseCalcClient:
         except Exception as ex:
             return [{"error": f"Failed to get purchases: {ex}"}]
 
+    # -------------------------------------------------------------------------
+    # Visits & Locations Endpoints (Google Timeline / Places)
+    # -------------------------------------------------------------------------
+
+    def get_visits(self, start_date: str, end_date: str = None) -> list[dict]:
+        """Fetch visited places from /visits/list between start_date and end_date (YYYY-MM-DD)."""
+        if not end_date:
+            end_date = start_date
+        try:
+            raw_visits = self._request("GET", "/visits/list", params={"startDate": start_date, "endDate": end_date})
+            if not isinstance(raw_visits, list):
+                return []
+
+            formatted = []
+            for v in raw_visits:
+                loc = v.get("location") or {}
+                dt_str = v.get("date", "")
+                time_str = dt_str[11:16] if len(dt_str) >= 16 else ""
+                formatted.append({
+                    "id": v.get("id"),
+                    "date": dt_str[:10] if len(dt_str) >= 10 else "",
+                    "time": time_str,
+                    "place_name": loc.get("name", "Unknown Location"),
+                    "address": loc.get("address") or "",
+                    "latitude": float(loc["latitude"]) if loc.get("latitude") is not None else None,
+                    "longitude": float(loc["longitude"]) if loc.get("longitude") is not None else None,
+                    "description": v.get("description") or "",
+                    "source": "purchase-calc"
+                })
+            return formatted
+        except Exception as ex:
+            return [{"error": f"Failed to get visits: {ex}"}]
+
+    def add_location(self, name: str, latitude: float = None, longitude: float = None, google_place_id: str = None, address: str = None) -> dict:
+        """Register a new location in purchase-calc."""
+        body = {"name": name}
+        if latitude is not None:
+            body["latitude"] = latitude
+        if longitude is not None:
+            body["longitude"] = longitude
+        if google_place_id:
+            body["googlePlaceId"] = google_place_id
+        if address:
+            body["address"] = address
+        try:
+            return self._request("POST", "/location/add", json_body=body)
+        except Exception as ex:
+            return {"error": f"Failed to add location: {ex}"}
+
+

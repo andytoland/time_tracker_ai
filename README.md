@@ -37,6 +37,7 @@ flowchart LR
 2. **Azure OpenAI Model**: Interprets intent and triggers backend functions/tools:
    - **Time Tracking (Azure Table Storage)**: `list_targets`, `create_target`, `log_time`, `get_summary`.
    - **Personal Finance & Tasks (GCP Cloud Run)**: `get_spending_summary`, `add_spending`, `list_todos`, `create_todo`, `toggle_todo`, `get_purchases`.
+   - **Location & Google Timeline (Azure Tables & Cloud Run)**: `get_places_visited` (whereabouts, visited places, durations, addresses).
    - **Cross-Service Synergy**: `log_time_on_todo` (logs time in Azure against a purchase-calc task and optionally completes it on Cloud Run).
 
 ---
@@ -160,18 +161,31 @@ Agent: Here is your logged time summary from Azure Table Storage:
 Total time logged: 105 minutes across 2 targets.
 ```
 
+#### Scenario F: Query visited places & whereabouts (Google Timeline)
+```text
+You: Where was I on January 23rd, 2026?
+Agent: On Friday, January 23rd, 2026, you visited:
+1. MorriSon's (10:52 AM)
+2. Kodan (12:48 PM)
+3. Ravintola Hang Out (Mustalahdentie 10) from 16:45 to 18:45 (2 hours)
+```
+
 ---
 
 ## File Structure
 
 ```text
 time_tracker_ai/
-├── agent.py                      # Conversational agent (Azure OpenAI + dual tool dispatch)
-├── storage.py                    # Azure Table Storage client (TimeTargets & TimeLogs)
+├── agent.py                      # Conversational agent (Azure OpenAI + multi-domain tools)
+├── storage.py                    # Azure Table Storage client (TimeTargets, TimeLogs, TimelineVisits)
 ├── purchase_client.py            # GCP Cloud Run REST API client (JWT Auth + HTTPS)
+├── import_timeline.py            # Google Timeline Takeout ingestion CLI
 ├── test_storage.py               # Storage connectivity check
 ├── test_purchase_integration.py  # Cloud Run API connectivity check
+├── docs/
+│   └── GOOGLE_TIMELINE_INTEGRATION.md # Detailed Google Timeline export & ingestion guide
 ├── .env                          # API keys, connection strings, Cloud Run URL
 ├── requirements.txt              # Python dependencies
 └── README.md                     # Documentation
 ```
+

@@ -279,6 +279,29 @@ TOOLS = [
                 "required": ["todo_id", "minutes"]
             }
         }
+    },
+
+    # ---------------- Location & Google Timeline Tools ----------------
+    {
+        "type": "function",
+        "function": {
+            "name": "get_places_visited",
+            "description": "Retrieve the places and locations the user visited on a specific day or date range (from Google Timeline and purchase-calc). Returns place names, addresses, arrival/departure times, and durations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date in format YYYY-MM-DD (e.g. '2026-01-23')."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date in format YYYY-MM-DD (defaults to start_date for a single day query)."
+                    }
+                },
+                "required": ["start_date"]
+            }
+        }
     }
 ]
 
@@ -376,12 +399,50 @@ def execute_tool_call(tool_name: str, arguments: dict) -> str:
             "todo_updated": todo_res if todo_res else ("Already completed" if matched and matched.get("isCompleted") else "Unchanged")
         })
 
+    # ---------------- Location & Google Timeline Tools ----------------
+    elif tool_name == "get_places_visited":
+        start_date = arguments.get("start_date")
+        end_date = arguments.get("end_date") or start_date
+
+        # 1. Fetch from Azure Table Storage (Google Timeline imports)
+        timeline_visits = storage.get_timeline_visits(start_date=start_date, end_date=end_date)
+
+        # 2. Fetch from purchase-calc Cloud Run
+        pcalc_visits = pcalc.get_visits(start_date=start_date, end_date=end_date)
+
+        # Merge and deduplicate
+        combined = []
+        seen_keys = set()
+
+        for v in timeline_visits:
+            key = (v.get("date"), (v.get("place_name") or "").lower(), v.get("time"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                combined.append(v)
+
+        for v in pcalc_visits:
+            key = (v.get("date"), (v.get("place_name") or "").lower(), v.get("time"))
+            if key not in seen_keys:
+                seen_keys.add(key)
+                combined.append(v)
+
+        # Sort chronologically by date and time
+        combined.sort(key=lambda x: (x.get("date", ""), x.get("time", "")))
+
+        return json.dumps({
+            "start_date": start_date,
+            "end_date": end_date,
+            "total_visits": len(combined),
+            "visits": combined
+        })
+
     return json.dumps({"error": f"Unknown function {tool_name}"})
 
 
-SYSTEM_PROMPT = """You are an intelligent AI Assistant with dual capabilities:
+SYSTEM_PROMPT = """You are an intelligent AI Assistant with multi-domain capabilities:
 1. Time Tracking: Logging minutes/hours against project targets (persisted in Azure Table Storage).
 2. Personal Finance & Tasks (Purchase Calc): Managing expenses, spending breakdowns, purchases, and todos (hosted 24/7 on Google Cloud Run at pc.lightsaber.biz).
+3. Location & Timeline History: Answering queries about visited places, locations, arrival/departure times, and durations (from Google Timeline and purchase-calc).
 
 CONVERSATIONAL RULES:
 1. Time Tracking (Azure Table Storage):
@@ -403,6 +464,12 @@ CONVERSATIONAL RULES:
    - When the user asks to see tasks/todos: call `list_todos` (use status='pending' if they ask for open/uncompleted tasks).
    - When user wants to add a task: call `create_todo`.
    - When user completes a task: call `toggle_todo`.
+
+4. Location & Timeline History (Google Timeline & Purchase-Calc):
+   - When the user asks where they were, which places they visited, or whether they visited a specific store/restaurant (e.g. "Where was I on Jan 23rd?", "Which places did I visit last week?", "Did I go to Fressi?"):
+     - Call `get_places_visited` with start_date and end_date.
+     - Present the visits chronologically with times (e.g. arrival/departure), place names, addresses, and durations if available.
+     - If the user was working at a location and wants to log time, offer or proceed to log project time in Azure Table Storage.
 
 Keep answers friendly, concise, and helpful. Format money amounts in EUR (€) and durations clearly in minutes and hours.
 """

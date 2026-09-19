@@ -15,7 +15,7 @@ except ImportError:
 
 
 def sanitize_table_key(key: str) -> str:
-    """Disallow invalid Azure Table partition/row key characters: / \ # ? and control chars."""
+    r"""Disallow invalid Azure Table partition/row key characters: / \ # ? and control chars."""
     if not key:
         return "UNKNOWN"
     cleaned = re.sub(r'[/\\#?\x00-\x1f\x7f-\x9f]', '_', key.strip())
@@ -49,6 +49,7 @@ class TimeTrackerStorage:
         self.service_client = TableServiceClient.from_connection_string(self.connection_string)
         self.targets_table_name = "TimeTargets"
         self.logs_table_name = "TimeLogs"
+        self.timeline_table_name = "TimelineVisits"
 
         self._ensure_tables_exist()
 
@@ -57,11 +58,13 @@ class TimeTrackerStorage:
         try:
             self.service_client.create_table_if_not_exists(table_name=self.targets_table_name)
             self.service_client.create_table_if_not_exists(table_name=self.logs_table_name)
+            self.service_client.create_table_if_not_exists(table_name=self.timeline_table_name)
         except Exception as ex:
             print(f"[Storage Warning] Could not ensure tables exist: {ex}")
 
         self.targets_client = self.service_client.get_table_client(self.targets_table_name)
         self.logs_client = self.service_client.get_table_client(self.logs_table_name)
+        self.timeline_client = self.service_client.get_table_client(self.timeline_table_name)
 
     def list_targets(self) -> list[dict]:
         """Fetch all registered targets."""
@@ -210,4 +213,59 @@ class TimeTrackerStorage:
                 for t in targets
             ]
         }
+
+    # -------------------------------------------------------------------------
+    # Timeline Visits Endpoints (Google Maps Timeline)
+    # -------------------------------------------------------------------------
+
+    def save_timeline_visit(self, visit_entity: dict) -> None:
+        """Upsert a single timeline visit into Azure Table Storage."""
+        self.timeline_client.upsert_entity(entity=visit_entity, mode=UpdateMode.MERGE)
+
+    def batch_save_timeline_visits(self, visits: list[dict]) -> int:
+        """Save a list of timeline visit entities."""
+        saved_count = 0
+        for v in visits:
+            try:
+                self.save_timeline_visit(v)
+                saved_count += 1
+            except Exception as ex:
+                print(f"[Storage Warning] Could not save visit {v.get('RowKey')}: {ex}")
+        return saved_count
+
+    def get_timeline_visits(self, start_date: str, end_date: str = None) -> list[dict]:
+        """Fetch timeline visits between start_date and end_date (YYYY-MM-DD)."""
+        if not end_date:
+            end_date = start_date
+
+        try:
+            if start_date == end_date:
+                query_filter = f"PartitionKey eq '{start_date}'"
+            else:
+                query_filter = f"PartitionKey ge '{start_date}' and PartitionKey le '{end_date}'"
+
+            entities = self.timeline_client.query_entities(query_filter=query_filter)
+            visits = []
+            for e in entities:
+                st = e.get("StartTime", "")
+                visits.append({
+                    "date": e.get("PartitionKey"),
+                    "start_time": st,
+                    "end_time": e.get("EndTime", ""),
+                    "time": st[11:16] if len(st) >= 16 else "",
+                    "duration_minutes": int(e.get("DurationMinutes", 0)),
+                    "place_name": e.get("PlaceName", "Unknown"),
+                    "address": e.get("Address", ""),
+                    "latitude": float(e["Latitude"]) if "Latitude" in e and e["Latitude"] is not None else None,
+                    "longitude": float(e["Longitude"]) if "Longitude" in e and e["Longitude"] is not None else None,
+                    "activity_type": e.get("ActivityType", ""),
+                    "google_place_id": e.get("GooglePlaceId", ""),
+                    "source": "google-timeline"
+                })
+            visits.sort(key=lambda x: x.get("start_time", ""))
+            return visits
+        except Exception as ex:
+            print(f"[Storage Error] Error fetching timeline visits: {ex}")
+            return []
+
 
