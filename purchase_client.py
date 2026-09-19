@@ -192,33 +192,54 @@ class PurchaseCalcClient:
         except Exception as ex:
             return {"error": f"Failed to add spending: {ex}"}
 
-    def get_spending_summary(self, start_date: str, end_date: str, location: str = None) -> dict:
-        """Calculates aggregated spending statistics between two dates."""
+    def get_spending_summary(self, start_date: str, end_date: str, location: str = None, origin: str = None) -> dict:
+        """Calculates aggregated spending statistics between two dates combining both manual spendings and parsed card/bank purchases."""
         try:
-            items = self.get_spending_list(start_date, end_date)
-            if items and isinstance(items, list) and "error" in items[0]:
-                return items[0]
+            manual_items = self.get_spending_list(start_date, end_date)
+            if not isinstance(manual_items, list):
+                manual_items = []
 
-            filtered = items
+            parsed_purchases = self.get_purchases(start_date, end_date, origin=origin)
+            if not isinstance(parsed_purchases, list):
+                parsed_purchases = []
+
             if location:
                 loc_lower = location.lower()
-                filtered = [i for i in items if loc_lower in str(i.get("locationName", "")).lower()]
+                manual_items = [i for i in manual_items if isinstance(i, dict) and loc_lower in str(i.get("locationName", "")).lower()]
+                parsed_purchases = [p for p in parsed_purchases if isinstance(p, dict) and loc_lower in str(p.get("merchant", "")).lower()]
 
-            total_sum = sum(float(i.get("sum", 0)) for i in filtered)
+            manual_sum = sum(float(i.get("sum", 0)) for i in manual_items if isinstance(i, dict) and "sum" in i)
+            parsed_sum = sum(float(p.get("sum", 0)) for p in parsed_purchases if isinstance(p, dict) and "sum" in p)
 
-            # Breakdown by location
-            by_loc = {}
-            for i in filtered:
-                loc = i.get("locationName") or "Unknown"
-                by_loc[loc] = round(by_loc.get(loc, 0) + float(i.get("sum", 0)), 2)
+            # Breakdown by location/merchant
+            by_merchant = {}
+            for p in parsed_purchases:
+                if isinstance(p, dict) and "sum" in p:
+                    m = p.get("merchant") or "Unknown"
+                    by_merchant[m] = round(by_merchant.get(m, 0) + float(p.get("sum", 0)), 2)
+
+            for i in manual_items:
+                if isinstance(i, dict) and "sum" in i:
+                    loc = i.get("locationName") or "Unknown (Manual)"
+                    by_merchant[loc] = round(by_merchant.get(loc, 0) + float(i.get("sum", 0)), 2)
+
+            # Breakdown by origin
+            by_origin = {}
+            for p in parsed_purchases:
+                if isinstance(p, dict) and "sum" in p:
+                    orig = p.get("origin") or "unknown"
+                    by_origin[orig] = round(by_origin.get(orig, 0) + float(p.get("sum", 0)), 2)
 
             return {
                 "start_date": start_date,
                 "end_date": end_date,
-                "total_spending": round(total_sum, 2),
-                "transaction_count": len(filtered),
-                "by_location": by_loc,
-                "items": filtered[:20]  # First 20 items to prevent token overflow
+                "combined_total_spending": round(manual_sum + parsed_sum, 2),
+                "parsed_purchases_total": round(parsed_sum, 2),
+                "manual_spendings_total": round(manual_sum, 2),
+                "total_transaction_count": len(manual_items) + len(parsed_purchases),
+                "by_origin": by_origin,
+                "by_merchant": dict(sorted(by_merchant.items(), key=lambda x: x[1], reverse=True)[:15]),
+                "recent_purchases": parsed_purchases[:10]
             }
         except Exception as ex:
             return {"error": f"Failed to summarize spending: {ex}"}
